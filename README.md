@@ -72,7 +72,7 @@ npm run check               # node --check 全部脚本
 npm test                    # 纯函数单测（不触网、不依赖 IMAP/AI）
 ```
 
-- **定时**：`mail-sync.yml` 用 `cron: '23 * * * *'`（每小时第 23 分）。招聘高峰可收紧到每 30 分钟（风控与实时性权衡）。
+- **定时**：`mail-sync.yml` 用 `cron: '23 */12 * * *'`（每 12 小时：UTC 00:23 与 12:23）。招聘高峰可改回每小时 `'23 * * * *'`（风控与实时性权衡）。
 - **手动**：`workflow_dispatch` 可传 `SINCE_DAYS` / `MAX_PER_RUN` 覆盖默认值。
 - **保活**：GitHub Actions 对 **60 天无活动**的仓库会**停用定时 workflow**，需偶尔手动 dispatch 一次保活。
 
@@ -104,7 +104,7 @@ npm test                    # 纯函数单测（不触网、不依赖 IMAP/AI）
 
 ## 默认值（可调）
 
-`SINCE_DAYS=30`、`MAX_PER_RUN=30`、`MIN_CONFIDENCE=0.3`、`IMAP_HOST=imap.qq.com`、`IMAP_PORT=993`、`KEYWORDS=面试|笔试|机试|测评|评估|offer|录用|应聘|招聘|简历|网申|入职|interview|assessment`。低于 `MIN_CONFIDENCE` 的建议直接丢弃；`0.3~0.6` 之间的仍进队列但网页端标黄（你要人工复核）。
+`SINCE_DAYS=30`、`MAX_PER_RUN=30`、`MIN_CONFIDENCE=0.3`、`IMAP_HOST=imap.qq.com`、`IMAP_PORT=993`、`KEYWORDS=面试|笔试|机试|测评|录用|应聘|招聘|校招|网申|入职|简历|interview`（已收紧：去掉了易命中营销/理财邮件的 `评估|offer|assessment`；如需微调，可新增一个 `KEYWORDS` Secret 覆盖，留空则用此默认值）。低于 `MIN_CONFIDENCE` 的建议直接丢弃；`0.3~0.6` 之间的仍进队列但网页端标黄（你要人工复核）。
 
 ## 故障排查
 

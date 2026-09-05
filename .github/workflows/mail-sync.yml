@@ -1,10 +1,10 @@
 name: mail-sync
 
-# 定时（每小时第 23 分）+ 手动触发：IMAP 增量拉取 → 预筛 → AI 判定 → 只 PATCH Gist 的 mail-suggestions.json。
+# 定时（每 12 小时：UTC 00:23 与 12:23）+ 手动触发：IMAP 增量拉取 → 预筛 → AI 判定 → 只 PATCH Gist 的 mail-suggestions.json。
 # 保活提示：GitHub Actions 对 60 天无活动的仓库会停用定时 workflow，需偶尔手动 dispatch 一次保活。
 on:
   schedule:
-    - cron: '23 * * * *'
+    - cron: '23 */12 * * *'
   workflow_dispatch:
     inputs:
       SINCE_DAYS:
@@ -53,6 +53,8 @@ jobs:
           SINCE_DAYS: ${{ github.event.inputs.SINCE_DAYS || '30' }}
           MAX_PER_RUN: ${{ github.event.inputs.MAX_PER_RUN || '30' }}
           MIN_CONFIDENCE: '0.3'
+          # 可选：设置 KEYWORDS Secret 即可覆盖默认关键词（留空则用 src/config.js 的 DEFAULT_KEYWORDS）
+          KEYWORDS: ${{ secrets.KEYWORDS }}
         run: node index.js
 
       # 兜底：主步骤硬失败时，把 meta.lastError 写进 Gist（保留已有 suggestions/水位），网页端可上屏提示。

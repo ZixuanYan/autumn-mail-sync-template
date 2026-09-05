@@ -14,8 +14,11 @@ const MAIL_SUGGEST_FILENAME = 'mail-suggestions.json';
 // 邮件类型枚举（AI 归一后的取值域）
 const EMAIL_TYPES = ['测评', '笔试', '机试', '面试邀请', 'Offer', '拒信', '其它'];
 
-// 预筛关键词默认值（可用 KEYWORDS 覆盖，用 | 分隔）
-const DEFAULT_KEYWORDS = '面试|笔试|机试|测评|评估|offer|录用|应聘|招聘|简历|网申|入职|interview|assessment';
+// 预筛关键词默认值（可用 KEYWORDS Secret/env 覆盖，用 | 分隔）
+// 已收紧：移除过于宽泛、易命中营销/理财邮件的 评估|offer|assessment；补充校招强相关词。
+// 说明：银行/理财营销常含「限時 offer / 風險評估 / assessment」而漏进；去掉这几个后，
+//       真正的招聘邮件仍会被 面试/笔试/录用/招聘/校招/应聘/网申/入职/简历/interview 命中。
+const DEFAULT_KEYWORDS = '面试|笔试|机试|测评|录用|应聘|招聘|校招|网申|入职|简历|interview';
 
 // 发件人/主题噪声排除（营销、退订、系统信使等），命中即丢弃，不进 AI
 const NOISE_PATTERN = 'unsubscribe|退订|newsletter|no-?reply|donotreply|do-not-reply|营销|推广|广告|postmaster|mailer-daemon|noreply|通知中心|服务通知';
