@@ -10,6 +10,8 @@ const STAGE_PRESETS = ['待投递', '已投递', '测评', '笔试', '机试', '
 
 // 建议文件名：Action 只 PATCH 这一个文件，永不读写 vault-*.json（不变量①⑥）
 const MAIL_SUGGEST_FILENAME = 'mail-suggestions.json';
+// 配置文件名：网页端写、Action 端读（明文，绝不含任何密钥）；用于网页可调项下发
+const MAIL_CONFIG_FILENAME = 'mail-config.json';
 
 // 邮件类型枚举（AI 归一后的取值域）
 const EMAIL_TYPES = ['测评', '笔试', '机试', '面试邀请', 'Offer', '拒信', '其它'];
@@ -66,8 +68,45 @@ function buildConfig() {
       token: strEnv('GIST_PAT', ''),
       apiBase: strEnv('GIST_API', 'https://api.github.com'),
       filename: MAIL_SUGGEST_FILENAME
-    })
+    }),
+    // 邮件建议加密密钥（可选）：设了则 mail-suggestions.json 加密存储；留空则明文（向后兼容）
+    mailEncKey: strEnv('MAIL_ENC_KEY', ''),
+    // 以下三项默认值，可被 Gist 里的 mail-config.json 覆盖（见 applyMailConfigOverrides）
+    enabled: true,
+    minIntervalHours: 0,
+    promptExtra: ''
   });
+}
+
+// 用网页端写入 Gist 的 mail-config.json 覆盖可调项（非密钥）。缺省/非法值回落到 cfg 原值。
+// 只覆盖：keywords / minConfidence / sinceDays / maxPerRun / enabled / minIntervalHours / promptExtra。
+function applyMailConfigOverrides(cfg, mailConfig) {
+  const mc = mailConfig && typeof mailConfig === 'object' ? mailConfig : {};
+  const num = (v, fb) => (String(v == null ? '' : v).trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : fb);
+  const str = (v, fb, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max || 4000) : fb);
+  return Object.freeze({
+    ...cfg,
+    keywords: str(mc.keywords, cfg.keywords, 2000),
+    minConfidence: num(mc.minConfidence, cfg.minConfidence),
+    sinceDays: num(mc.sinceDays, cfg.sinceDays),
+    maxPerRun: num(mc.maxPerRun, cfg.maxPerRun),
+    enabled: mc.enabled === false ? false : true, // 仅显式 false 才禁用
+    minIntervalHours: Math.max(0, num(mc.minIntervalHours, cfg.minIntervalHours)),
+    promptExtra: str(mc.promptExtra, cfg.promptExtra, 2000)
+  });
+}
+
+// 运行门禁（纯函数）：返回跳过原因字符串或 null（继续）。跳过发生在 IMAP/AI 之前 → 0 token。
+function gateReason(cfg, prevMeta) {
+  if (cfg && cfg.enabled === false) return 'mail-config.json 中 enabled=false（网页端已关闭邮件同步）';
+  const hours = Number(cfg && cfg.minIntervalHours) || 0;
+  if (hours > 0 && prevMeta && prevMeta.lastRunAt) {
+    const last = Date.parse(prevMeta.lastRunAt);
+    if (Number.isFinite(last) && (Date.now() - last) < hours * 3600e3) {
+      return `距上次运行不足 ${hours} 小时（minIntervalHours=${hours}）`;
+    }
+  }
+  return null;
 }
 
 function escapeRegExp(s) {
@@ -89,9 +128,12 @@ module.exports = {
   STAGE_PRESETS,
   EMAIL_TYPES,
   MAIL_SUGGEST_FILENAME,
+  MAIL_CONFIG_FILENAME,
   DEFAULT_KEYWORDS,
   NOISE_PATTERN,
   buildConfig,
+  applyMailConfigOverrides,
+  gateReason,
   keywordRegex,
   noiseRegex,
   escapeRegExp

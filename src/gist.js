@@ -7,6 +7,7 @@
 // ============================================================================
 
 const GITHUB_API_VERSION = '2022-11-28';
+const { encryptJson, decryptJson, isEncryptedPayload } = require('./crypto');
 
 function headers(cfg, withBody) {
   return {
@@ -31,24 +32,33 @@ async function gistGet(cfg, fetchImpl) {
   return res.json();
 }
 
-// 从 Gist 响应里取出建议文件并解析；缺失/损坏静默返回 null（不抛错）
-function readMailFile(gist, filename) {
+// 从 Gist 响应里取出文件并解析；支持加密信封（有 encKey 则解密）；缺失/损坏/无法解密静默返回 null。
+// 也用于读明文的 mail-config.json（不传 encKey 即可）。
+async function readMailFile(gist, filename, encKey) {
   const file = gist && gist.files && gist.files[filename];
   const content = file && (file.content != null ? file.content : '');
   if (!content || !String(content).trim()) return null;
   try {
     const parsed = JSON.parse(content);
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (isEncryptedPayload(parsed)) {
+      if (!encKey) return null; // 加密但无密钥：无法读取（水位将从头开始）
+      return await decryptJson(parsed, encKey);
+    }
+    return parsed;
   } catch (_) {
-    return null; // 损坏：静默跳过，按空状态处理
+    return null; // 损坏或解密失败：静默跳过，按空状态处理
   }
 }
 
-// PATCH 只写 mail-suggestions.json 一个文件（永不触碰 vault）
+// PATCH 只写 mail-suggestions.json 一个文件（永不触碰 vault）；配了 MAIL_ENC_KEY 则加密存储
 async function patchMailFile(cfg, payloadObj, fetchImpl) {
   const doFetch = fetchImpl || globalThis.fetch;
+  const content = cfg.mailEncKey
+    ? JSON.stringify(await encryptJson(payloadObj, cfg.mailEncKey))
+    : JSON.stringify(payloadObj, null, 2);
   const body = JSON.stringify({
-    files: { [cfg.gist.filename]: { content: JSON.stringify(payloadObj, null, 2) } }
+    files: { [cfg.gist.filename]: { content } }
   });
   const res = await doFetch(`${cfg.gist.apiBase}/gists/${encodeURIComponent(cfg.gist.id)}`, {
     method: 'PATCH',

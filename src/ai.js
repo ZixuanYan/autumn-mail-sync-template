@@ -23,6 +23,13 @@ const SYSTEM_PROMPT = [
   '9. 拒信（含「遗憾」「未通过」「进入人才库」等）→ emailType「拒信」、stage 可填「已结束」、confidence 偏低。'
 ].join('\n');
 
+// 在内置系统提示词基础上追加用户自定义要求（只追加、不替换，保护「仅返回 JSON」的硬契约）
+function buildSystemPrompt(promptExtra) {
+  const extra = String(promptExtra || '').trim();
+  if (!extra) return SYSTEM_PROMPT;
+  return `${SYSTEM_PROMPT}\n\n用户附加要求（须在不违反上述所有规则的前提下参考，尤其是"只返回 JSON、不得编造、stage 仅限 allowedStages"）：\n${extra.slice(0, 2000)}`;
+}
+
 function pad2(n) { return String(n).padStart(2, '0'); }
 
 function clampConfidence(v) {
@@ -159,7 +166,7 @@ async function aiAnalyze(mail, cfg, useResponseFormat, fetchImpl) {
     model: cfg.ai.model,
     temperature: 0,
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildSystemPrompt(cfg.promptExtra) },
       { role: 'user', content: buildUserContent(mail) }
     ]
   };
@@ -224,6 +231,7 @@ async function analyzeEmail(mail, cfg, fetchImpl) {
 
 module.exports = {
   SYSTEM_PROMPT,
+  buildSystemPrompt,
   analyzeEmail,
   aiAnalyze,
   placeholderAnalyze,

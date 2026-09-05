@@ -10,7 +10,7 @@
 //   软失败（部分 AI 调用失败）→ 正常写建议与水位，meta.lastStatus='error'+lastError 上屏 → 退出码 0。
 // ============================================================================
 
-const { buildConfig, keywordRegex } = require('./src/config');
+const { buildConfig, keywordRegex, applyMailConfigOverrides, gateReason, MAIL_CONFIG_FILENAME } = require('./src/config');
 const { openInbox, closeInbox, planFetch, fetchMessages } = require('./src/imap');
 const { isCandidate } = require('./src/prefilter');
 const { parseMessage } = require('./src/parse');
@@ -18,22 +18,36 @@ const { computeWatermark, buildSuggestion, mergeSuggestions, buildMeta } = requi
 const { gistGet, readMailFile, patchMailFile } = require('./src/gist');
 const { analyzeEmail } = require('./src/ai');
 
-function assertSecrets(cfg) {
+function assertGistSecrets(cfg) {
   const missing = [];
-  if (!cfg.imap.user) missing.push('QQ_EMAIL');
-  if (!cfg.imap.pass) missing.push('QQ_AUTHCODE');
   if (!cfg.gist.id) missing.push('GIST_ID');
   if (!cfg.gist.token) missing.push('GIST_PAT');
   if (missing.length) throw new Error(`缺少必需 Secrets：${missing.join(', ')}`);
 }
+function assertImapSecrets(cfg) {
+  const missing = [];
+  if (!cfg.imap.user) missing.push('QQ_EMAIL');
+  if (!cfg.imap.pass) missing.push('QQ_AUTHCODE');
+  if (missing.length) throw new Error(`缺少必需 Secrets：${missing.join(', ')}`);
+}
+
+// 读一次 Gist：取回 mail-config.json（明文）与已有 mail-suggestions.json（可能加密）
+async function loadGistState(cfg) {
+  const gist = await gistGet(cfg);
+  const mailConfig = await readMailFile(gist, MAIL_CONFIG_FILENAME); // 明文，不传 encKey
+  const prevFile = await readMailFile(gist, cfg.gist.filename, cfg.mailEncKey);
+  return {
+    mailConfig,
+    prev: {
+      meta: (prevFile && prevFile.meta && typeof prevFile.meta === 'object') ? prevFile.meta : {},
+      suggestions: (prevFile && Array.isArray(prevFile.suggestions)) ? prevFile.suggestions : []
+    }
+  };
+}
 
 async function loadPrev(cfg) {
-  const gist = await gistGet(cfg);
-  const prev = readMailFile(gist, cfg.gist.filename);
-  return {
-    meta: (prev && prev.meta && typeof prev.meta === 'object') ? prev.meta : {},
-    suggestions: (prev && Array.isArray(prev.suggestions)) ? prev.suggestions : []
-  };
+  const { prev } = await loadGistState(cfg);
+  return prev;
 }
 
 // 尽力写 error meta：保留旧 suggestions 与旧水位（本轮不可信）
@@ -56,10 +70,17 @@ async function writeErrorMeta(cfg, message) {
 }
 
 async function run() {
-  const cfg = buildConfig();
-  assertSecrets(cfg);
+  const cfg0 = buildConfig();
+  assertGistSecrets(cfg0);
 
-  const prev = await loadPrev(cfg);
+  const { mailConfig, prev } = await loadGistState(cfg0);
+  const cfg = applyMailConfigOverrides(cfg0, mailConfig);
+  console.log(`[sync] 配置：enabled=${cfg.enabled} minIntervalHours=${cfg.minIntervalHours} keywords="${cfg.keywords}" minConf=${cfg.minConfidence} sinceDays=${cfg.sinceDays} maxPerRun=${cfg.maxPerRun} enc=${cfg.mailEncKey ? 'on' : 'off'} promptExtra=${cfg.promptExtra ? 'yes' : 'no'}`);
+
+  const skip = gateReason(cfg, prev.meta);
+  if (skip) { console.log(`[sync] ⏭️ 跳过本次（0 token）：${skip}`); return; }
+
+  assertImapSecrets(cfg);
   console.log(`[sync] 读回水位 lastUid=${prev.meta.lastUid || 0} uidValidity=${prev.meta.lastUidValidity || 0}，已有建议 ${prev.suggestions.length} 条`);
 
   const { client, lock, mailbox } = await openInbox(cfg);

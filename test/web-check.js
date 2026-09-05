@@ -41,7 +41,7 @@ const si = html.indexOf(startMark);
 const ei = html.indexOf(endMark);
 check('找到纯函数块标记', () => { assert.ok(si !== -1 && ei !== -1 && ei > si, '未找到 __MAIL_PURE_START__/__END__ 标记'); });
 const pureSrc = html.slice(si + startMark.length, ei);
-const helpers = new Function(`${pureSrc}; return { normalizeCompanySlug, diceCoefficient, companyMatchScore, matchRecordsByCompany, filterMailSuggestions };`)();
+const helpers = new Function(`${pureSrc}; return { normalizeCompanySlug, diceCoefficient, companyMatchScore, matchRecordsByCompany, filterMailSuggestions, unionIdList, unionMailState };`)();
 
 check('normalizeCompanySlug 剥离后缀 + 全角转半角 + 小写', () => {
   const { normalizeCompanySlug, companyMatchScore } = helpers;
@@ -93,6 +93,28 @@ check('filterMailSuggestions 过滤 applied/dismissed', () => {
   const sugs = [{ id: 'uid-1' }, { id: 'uid-2' }, { id: 'uid-3' }];
   const out = filterMailSuggestions(sugs, ['uid-1'], ['uid-3']);
   assert.deepStrictEqual(out.map(s => s.id), ['uid-2']);
+});
+
+check('unionMailState 跨设备并集合并（去重、含远端项）', () => {
+  const { unionMailState } = helpers;
+  const local = { appliedIds: ['uid-1'], dismissedIds: ['uid-2', 'uid-3'] };
+  const remote = { appliedIds: ['uid-1', 'uid-9'], dismissedIds: ['uid-4'] };
+  const m = unionMailState(local, remote);
+  assert.deepStrictEqual(m.appliedIds.sort(), ['uid-1', 'uid-9']);
+  assert.deepStrictEqual(m.dismissedIds.sort(), ['uid-2', 'uid-3', 'uid-4']);
+});
+check('unionMailState 远端为 null（老 payload）时=本地不变', () => {
+  const { unionMailState } = helpers;
+  const local = { appliedIds: ['a'], dismissedIds: ['b'] };
+  const m = unionMailState(local, null);
+  assert.deepStrictEqual(m.appliedIds, ['a']);
+  assert.deepStrictEqual(m.dismissedIds, ['b']);
+});
+check('unionIdList 去重且 cap 上限', () => {
+  const { unionIdList } = helpers;
+  assert.deepStrictEqual(unionIdList(['x', 'y'], ['y', 'z']), ['x', 'y', 'z']);
+  const big = unionIdList(Array.from({ length: 600 }, (_, i) => `id${i}`), [], 500);
+  assert.strictEqual(big.length, 500);
 });
 
 console.log(`\n${failed ? `存在 ${failed} 个失败` : '网页端校验全部通过'}`);

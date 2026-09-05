@@ -32,16 +32,23 @@ const sandbox = {
   formatDateTime: v => (v ? `DT(${v})` : '暂未安排'),
   localDateInput: () => '2026-09-05',
   MAIL_STORAGE_KEY: 'test.mail.v1',
+  MAIL_CONFIG_FILENAME: 'mail-config.json',
+  MAIL_CFG_DEFAULTS: { keywords: 'K', minConfidence: 0.3, sinceDays: 30, maxPerRun: 30, enabled: true, minIntervalHours: 0, promptExtra: '' },
   localStorage: { _s: {}, getItem(k) { return Object.prototype.hasOwnProperty.call(this._s, k) ? this._s[k] : null; }, setItem(k, v) { this._s[k] = String(v); } },
+  crypto: { getRandomValues: a => { for (let i = 0; i < a.length; i += 1) a[i] = Math.floor(Math.random() * 256); return a; } },
   records: [],
-  syncConfig: { token: '' },
-  mailState: { appliedIds: [], dismissedIds: [], lastReadAt: '' },
+  syncConfig: { token: '', gistId: 'GID' },
+  mailState: { appliedIds: [], dismissedIds: [], lastReadAt: '', encKey: '' },
   mailSuggestions: [],
+  mailRawSuggestions: [],
   mailMeta: null,
+  mailConfig: null,
+  mailNeedKey: false,
   pendingMailSeedId: null,
   normalizeRecord: o => ({ ...o, id: o.id || 'new', stage: o.stage || '待投递', timeline: o.timeline || [{ stage: o.stage || '待投递', at: '2026-09-05', note: '' }] }),
   setTimeline: (rec, tl) => { rec.timeline = tl; rec.stage = tl[tl.length - 1].stage; return rec; },
   saveRecords: () => {}, render: () => {}, flashRow: () => {}, playOfferStamp: () => {}, showToast: () => {}, openDialog: () => {},
+  scheduleSyncPush: () => {}, resolveSyncGist: async () => 'GID', gistRequest: async () => ({}), syncNow: async () => {}, openSyncDialog: () => {},
   CSS: { escape: s => s },
   document: { querySelector: () => null }
 };
@@ -145,6 +152,33 @@ check('updateMailBadge 数量>0 显示、=0 隐藏', () => {
   sandbox.mailSuggestions = [];
   sandbox.updateMailBadge();
   assert.strictEqual(badge().hidden, true);
+});
+
+console.log('加密 / 配置 / 跨设备（v4.3.0）');
+check('mailNeedKey=true → 提示填写解密密钥、列表清空', () => {
+  sandbox.syncConfig.token = 'tok';
+  sandbox.mailNeedKey = true;
+  sandbox.renderMailView();
+  assert.ok(bar().className.includes('warning'));
+  assert.ok(bar().innerHTML.includes('邮件建议已加密'));
+  assert.strictEqual(list().innerHTML, '');
+  sandbox.mailNeedKey = false;
+});
+check('applyMailPayload 存原始建议；refilterMail 按 mailState 过滤（模拟跨设备合并）', () => {
+  sandbox.mailState = { appliedIds: ['uid-2'], dismissedIds: [], lastReadAt: '', encKey: '' };
+  sandbox.applyMailPayload({ meta: { lastStatus: 'ok' }, suggestions: [{ id: 'uid-1' }, { id: 'uid-2' }, { id: 'uid-3' }] });
+  assert.strictEqual(sandbox.mailRawSuggestions.length, 3);
+  assert.deepStrictEqual(sandbox.mailSuggestions.map(s => s.id), ['uid-1', 'uid-3']);
+  sandbox.mailState.dismissedIds = ['uid-1']; // 另一设备忽略了 uid-1，同步并集后
+  sandbox.refilterMail();
+  assert.deepStrictEqual(sandbox.mailSuggestions.map(s => s.id), ['uid-3']);
+});
+check('currentMailConfig 无云端配置时回落默认值', () => {
+  sandbox.mailConfig = null;
+  const c = sandbox.currentMailConfig();
+  assert.strictEqual(c.minConfidence, 0.3);
+  assert.strictEqual(c.enabled, true);
+  assert.strictEqual(c.sinceDays, 30);
 });
 
 console.log(`\n${failed ? `存在 ${failed} 个失败` : '邮件提醒运行时冒烟测试全部通过'}`);

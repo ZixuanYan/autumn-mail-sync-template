@@ -48,6 +48,7 @@ jobs:
           AI_MODEL: ${{ secrets.AI_MODEL }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_PAT: ${{ secrets.GIST_PAT }}
+          MAIL_ENC_KEY: ${{ secrets.MAIL_ENC_KEY }}
           IMAP_HOST: imap.qq.com
           IMAP_PORT: '993'
           SINCE_DAYS: ${{ github.event.inputs.SINCE_DAYS || '30' }}
@@ -63,5 +64,6 @@ jobs:
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_PAT: ${{ secrets.GIST_PAT }}
+          MAIL_ENC_KEY: ${{ secrets.MAIL_ENC_KEY }}
           MAIL_SYNC_ERROR: '邮件同步失败，请查看本次 Action 日志（常见原因：QQ 授权码失效 / AI 超额 / IMAP 被风控）'
         run: node index.js --report-error

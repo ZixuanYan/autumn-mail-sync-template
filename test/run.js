@@ -14,6 +14,8 @@ const parse = require('../src/parse');
 const state = require('../src/state');
 const ai = require('../src/ai');
 const gist = require('../src/gist');
+const crypto = require('../src/crypto');
+const nodeCrypto = require('crypto'); // 用于「跨端兼容」验证：以浏览器同款算法的经典实现解密 Action 密文
 
 let passed = 0;
 let failed = 0;
@@ -136,19 +138,87 @@ test('placeholderAnalyze 无 Key 时可跑，company 粗提取、stage 空、con
   assert.ok(r.proposed && r.proposed.milestone);
 });
 
-test('readMailFile 损坏内容静默返回 null', () => {
-  assert.strictEqual(gist.readMailFile({ files: { 'mail-suggestions.json': { content: '{ not json' } } }, 'mail-suggestions.json'), null);
-  assert.strictEqual(gist.readMailFile({ files: {} }, 'mail-suggestions.json'), null);
+test('readMailFile 损坏内容静默返回 null', async () => {
+  assert.strictEqual(await gist.readMailFile({ files: { 'mail-suggestions.json': { content: '{ not json' } } }, 'mail-suggestions.json'), null);
+  assert.strictEqual(await gist.readMailFile({ files: {} }, 'mail-suggestions.json'), null);
+});
+test('readMailFile 明文可读；加密信封需 key（无 key→null，有 key→解密）', async () => {
+  const plain = { files: { 'x.json': { content: JSON.stringify({ a: 1 }) } } };
+  assert.deepStrictEqual(await gist.readMailFile(plain, 'x.json'), { a: 1 });
+  const env = await crypto.encryptJson({ meta: { lastUid: 7 }, suggestions: [] }, 'k1');
+  const g = { files: { 'x.json': { content: JSON.stringify(env) } } };
+  assert.strictEqual(await gist.readMailFile(g, 'x.json'), null);
+  assert.strictEqual((await gist.readMailFile(g, 'x.json', 'k1')).meta.lastUid, 7);
 });
 test('patchMailFile 只提交 mail-suggestions.json，绝不触碰 vault', async () => {
   let captured = null;
   const stubFetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({}) }; };
-  const cfg = { gist: { apiBase: 'https://api.github.com', id: 'GID', token: 'T', filename: 'mail-suggestions.json' } };
+  const cfg = { gist: { apiBase: 'https://api.github.com', id: 'GID', token: 'T', filename: 'mail-suggestions.json' }, mailEncKey: '' };
   await gist.patchMailFile(cfg, { meta: {}, suggestions: [] }, stubFetch);
   const body = JSON.parse(captured.opts.body);
   const keys = Object.keys(body.files);
   assert.deepStrictEqual(keys, ['mail-suggestions.json']);
   assert.ok(!keys.some(k => /^vault-/.test(k) || k === 'qiuzhao-tracker-data.json'));
+});
+test('patchMailFile 配了 MAIL_ENC_KEY 时写入密文信封（明文不含 company 等字段）', async () => {
+  let captured = null;
+  const stubFetch = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, json: async () => ({}) }; };
+  const cfg = { gist: { apiBase: 'https://api.github.com', id: 'GID', token: 'T', filename: 'mail-suggestions.json' }, mailEncKey: 'secret' };
+  await gist.patchMailFile(cfg, { meta: {}, suggestions: [{ company: '秘密公司' }] }, stubFetch);
+  const content = JSON.parse(captured.opts.body).files['mail-suggestions.json'].content;
+  const env = JSON.parse(content);
+  assert.strictEqual(env.enc, 'AES-GCM-PBKDF2');
+  assert.ok(!content.includes('秘密公司')); // 明文里看不到敏感内容
+  assert.deepStrictEqual(await crypto.decryptJson(env, 'secret'), { meta: {}, suggestions: [{ company: '秘密公司' }] });
+});
+
+test('crypto 信封格式与网页一致（v/enc/salt/iv/data）', async () => {
+  const env = await crypto.encryptJson({ hello: '世界' }, 'k');
+  assert.strictEqual(env.v, 1);
+  assert.strictEqual(env.enc, 'AES-GCM-PBKDF2');
+  assert.ok(env.salt && env.iv && env.data);
+});
+test('crypto 往返 encryptJson→decryptJson', async () => {
+  const obj = { meta: { lastUid: 42 }, suggestions: [{ id: 'uid-1', company: '腾讯' }] };
+  assert.deepStrictEqual(await crypto.decryptJson(await crypto.encryptJson(obj, 'pw'), 'pw'), obj);
+});
+test('跨端兼容：Action(webcrypto) 密文能被"浏览器同款算法"(node 经典 PBKDF2+AES-256-GCM) 解密', async () => {
+  const obj = { meta: { lastStatus: 'ok' }, suggestions: [{ id: 'uid-9', summary: '面试通知' }] };
+  const key = 'mail-enc-key-测试';
+  const env = await crypto.encryptJson(obj, key);
+  const salt = Buffer.from(env.salt, 'base64');
+  const iv = Buffer.from(env.iv, 'base64');
+  const data = Buffer.from(env.data, 'base64');
+  const derived = nodeCrypto.pbkdf2Sync(key, salt, 120000, 32, 'sha256');
+  const tag = data.subarray(data.length - 16);
+  const cipherText = data.subarray(0, data.length - 16);
+  const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', derived, iv);
+  decipher.setAuthTag(tag);
+  const plain = Buffer.concat([decipher.update(cipherText), decipher.final()]).toString('utf8');
+  assert.deepStrictEqual(JSON.parse(plain), obj);
+});
+
+test('applyMailConfigOverrides 覆盖可调项、非法/缺省回落', () => {
+  const base = config.buildConfig();
+  const cfg = config.applyMailConfigOverrides(base, { keywords: '面试|Offer', minConfidence: '0.5', sinceDays: 7, enabled: false, minIntervalHours: 12, promptExtra: '只看互联网' });
+  assert.strictEqual(cfg.keywords, '面试|Offer');
+  assert.strictEqual(cfg.minConfidence, 0.5);
+  assert.strictEqual(cfg.sinceDays, 7);
+  assert.strictEqual(cfg.enabled, false);
+  assert.strictEqual(cfg.minIntervalHours, 12);
+  assert.strictEqual(cfg.promptExtra, '只看互联网');
+  const cfg2 = config.applyMailConfigOverrides(base, { minConfidence: 'abc', sinceDays: null });
+  assert.strictEqual(cfg2.minConfidence, base.minConfidence);
+  assert.strictEqual(cfg2.sinceDays, base.sinceDays);
+  assert.strictEqual(cfg2.enabled, true);
+});
+test('gateReason：禁用或间隔未到→跳过；否则继续(null)', () => {
+  const base = config.buildConfig();
+  assert.ok(config.gateReason(config.applyMailConfigOverrides(base, { enabled: false }), {}));
+  const recent = { lastRunAt: new Date().toISOString() };
+  assert.ok(config.gateReason(config.applyMailConfigOverrides(base, { minIntervalHours: 12 }), recent));
+  assert.strictEqual(config.gateReason(config.applyMailConfigOverrides(base, { minIntervalHours: 12 }), { lastRunAt: new Date(Date.now() - 13 * 3600e3).toISOString() }), null);
+  assert.strictEqual(config.gateReason(base, recent), null);
 });
 
 runAll();

@@ -44,6 +44,7 @@ M0 目的：在投入真实联调前，验证最脆弱的假设——**QQ 授权
    | `AI_MODEL` | 模型名 | `deepseek-chat`（百炼填 `qwen-plus`） |
    | `GIST_ID` | 现有同步 Gist 的 ID | `a1b2c3…` |
    | `GIST_PAT` | 有 gist 权限的 PAT | `ghp_…` |
+   | `MAIL_ENC_KEY` | （可选）加密 `mail-suggestions.json` 的密钥；网页端「设置」填**完全相同**的密钥才能解密。留空=明文 | 随机长串（网页可「生成」）|
 
    > 换百炼：`AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`AI_MODEL=qwen-plus`。
    > 不配 `AI_API_KEY` 也能跑（M1 占位启发式：粗提取公司、不判阶段、confidence=0），配了才启用 M2 真实 AI 分析。
@@ -105,6 +106,38 @@ npm test                    # 纯函数单测（不触网、不依赖 IMAP/AI）
 ## 默认值（可调）
 
 `SINCE_DAYS=30`、`MAX_PER_RUN=30`、`MIN_CONFIDENCE=0.3`、`IMAP_HOST=imap.qq.com`、`IMAP_PORT=993`、`KEYWORDS=面试|笔试|机试|测评|录用|应聘|招聘|校招|网申|入职|简历|interview`（已收紧：去掉了易命中营销/理财邮件的 `评估|offer|assessment`；如需微调，可新增一个 `KEYWORDS` Secret 覆盖，留空则用此默认值）。低于 `MIN_CONFIDENCE` 的建议直接丢弃；`0.3~0.6` 之间的仍进队列但网页端标黄（你要人工复核）。
+
+## 网页端可视化配置（mail-config.json）
+
+网页「邮件提醒 → 设置」可把**非密钥**的可调项写进你 Gist 的 `mail-config.json`（明文），Action 每次运行先读它、覆盖默认值：
+
+- `keywords`（预筛关键词）、`minConfidence`、`sinceDays`、`maxPerRun`
+- `enabled`（false → Action 直接跳过，**0 token**）
+- `minIntervalHours`（距上次运行不足该小时数则跳过，**0 token**）——用它变相控制拉取频率，无需改 cron
+- `promptExtra`（在内置系统提示词后**追加**你的要求，如"只关注互联网/国企"；不替换、不破坏"仅返回 JSON"契约）
+
+优先级：`mail-config.json` > 环境变量/Secret（如 `KEYWORDS`）> 代码默认值。密钥类（QQ/AI/PAT/MAIL_ENC_KEY）**不在**此文件，只能在 Secrets。
+
+## 邮件建议加密（MAIL_ENC_KEY）
+
+GitHub 的 **secret gist 并非真私有**——凭 URL 即可访问。为避免 `mail-suggestions.json`（明文含发件人/主题/摘要）被凭 Gist ID 读到，可启用加密：
+
+1. 网页「设置 → 邮件解密密钥」点「生成」得到一串密钥；
+2. 把**同一串**填进本仓库 `MAIL_ENC_KEY` Secret，并在网页保存；
+3. 之后 Action 用 AES-GCM-PBKDF2（与网页 vault 同款算法/格式，见 `src/crypto.js`）加密写入，网页用同一把密钥解密查看。
+
+留空 `MAIL_ENC_KEY` = 明文（向后兼容）。密钥只存仓库 Secret 与网页本机 localStorage，**绝不写进 Gist**。
+
+## 作为模板供他人自托管（BYO）
+
+本仓库代码**不含任何密钥**，可作为模板让他人 fork 自托管（网页端读的是"当前用户自己的 Gist"，天然多租户，无需改网页）：
+
+1. fork / 复制本仓库 → **务必设为 private**（⚠️ 公开仓库的 workflow 运行日志是公开的，而 `connectivity-test` 会打印真实邮件主题/发件人）；
+2. 在自己的私有仓库配 8 个 Secrets（含可选 `MAIL_ENC_KEY`）；
+3. 先跑 `connectivity-test`（M0）验证能登录，再启用 `mail-sync` 定时；
+4. 打开同一个公开网页 → 云同步填自己的 PAT → 「邮件提醒」即读自己的 Gist。
+
+> 维护提示：他人实例与本模板代码需各自维护；如本仓库升级，fork 方自行同步。
 
 ## 故障排查
 
