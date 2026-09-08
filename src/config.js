@@ -4,9 +4,26 @@
 // 不变量③：密钥只从环境变量读，永不写盘、永不进 Gist 建议文件、永不进浏览器。
 // ============================================================================
 
-// 单一事实源提醒：STAGE_PRESETS 必须与网页端 autumn-recruitment-tracker/index.html
-// 的 STAGE_PRESETS 完全一致（14 项、同序）。AI 只能从中选 stage，选不出留空。
-const STAGE_PRESETS = ['待投递', '已投递', '测评', '笔试', '机试', '一面', '二面', '三面', '四面', '五面', '交叉面', 'HR面', 'Offer', '已结束'];
+// 单一事实源：14 个阶段值来自仓库根 shared/stages.js，与网页版 index.html、浏览器插件同源——
+// 此前这里是一份独立字面量，靠注释「必须与网页端完全一致」维持；谁改了网页版忘了改这里，
+// AI 就会把「交叉面」判成非法阶段而**静默置空**（邮件照样入库，只是阶段字段没了）。
+//
+// 路径与可移植性——同步到独立仓库时必须一并处理，否则 Action 起不来：
+// 1. 本文件在 monorepo 的 services/mail-sync/src/（深三层），回到仓库根 shared/ 需要**三个** ../；
+//    写成 ../../shared/stages 只到 services/shared/，MODULE_NOT_FOUND。
+// 2. 但**独立仓库**（私有运行实例 autumn-mail-sync、公开 template）的布局是根级 src/，
+//    本文件到仓库根只需**一个** ../，而且那些仓库里本来没有 shared/。所以同步脚本必须做两件事：
+//      ① 把 shared/stages.js 一并拷进目标仓库的 shared/；
+//      ② 把这一行的 ../../../ 改写为 ../（scripts/sync-template.js 自动做）。
+//    缺任何一步，目标仓库的 Action 启动即崩，且 test/run.js 也会连带失败（它 require 本文件）。
+//    改写层级时别想当然：曾在同步脚本里写成 ../../（以为独立仓库"深两层"），而且在 monorepo 内
+//    验证时**假绿**——staging/src 往上两层恰好是仓库根，那里真有 shared/；只有把产物复制到
+//    monorepo 之外跑才暴露 MODULE_NOT_FOUND。所以 sync-template.js 的 --test 刻意在隔离目录里跑。
+// 3. 在同步脚本落地之前，独立仓库里这一行**仍是字面量副本**（那边跑的是 v0.4.0，功能正常）。
+//    请勿手工把本文件覆盖过去——那会直接打死线上定时任务。
+//
+// AI 只能从这 14 个里选 stage，选不出留空（严格校验见 ai.js 的 normalizeStage）。
+const { STAGE_PRESETS } = require('../shared/stages');
 
 // 建议文件名：Action 只 PATCH 这一个文件，永不读写 vault-*.json（不变量①⑥）
 const MAIL_SUGGEST_FILENAME = 'mail-suggestions.json';
@@ -22,8 +39,45 @@ const EMAIL_TYPES = ['测评', '笔试', '机试', '面试邀请', 'Offer', '拒
 //       真正的招聘邮件仍会被 面试/笔试/录用/招聘/校招/应聘/网申/入职/简历/interview 命中。
 const DEFAULT_KEYWORDS = '面试|笔试|机试|测评|录用|应聘|招聘|校招|网申|入职|简历|interview';
 
-// 发件人/主题噪声排除（营销、退订、系统信使等），命中即丢弃，不进 AI
-const NOISE_PATTERN = 'unsubscribe|退订|newsletter|no-?reply|donotreply|do-not-reply|营销|推广|广告|postmaster|mailer-daemon|noreply|通知中心|服务通知';
+// ===== 噪声排除：拆成「发件人」与「主题」两张表，各自只作用于该作用的对象 =====
+//
+// 为什么必须拆开（v4.6.1 修复的核心缺陷）：
+// 旧版只有一张 NOISE_PATTERN，同时匹配 from 与 subject，其中含 no-?reply|donotreply|noreply。
+// 而招聘系统的通知邮件几乎全部由机器地址发出——实测 21 个真实招聘发件地址
+// （Moka / 北森 iTalent / 牛客 / 智联 / 猎聘 / 实习僧 / 腾讯校招 / 阿里校招 / 字节 / 美团 /
+//   京东 / 大易 / 24Talent / 用友 …）在主题明确写着「【面试邀请】…」的情况下，18 个被误杀。
+// 更要命的是误杀不可逆：computeWatermark 会把水位推过这些邮件，后续运行永不回看。
+//
+// 取舍原则：预筛只为省 token，准确性由 AI 把关。
+//   漏掉一封真面邀 = 不可逆的损失（水位推过就永久跳过，且用户无从察觉）；
+//   多放行一封营销邮件 = 几分钱 token，且后面还有 AI 的 isRecruitment 判定、
+//   MIN_CONFIDENCE 阈值、以及网页端人工复核三道拦截。
+// 因此这两张表只保留「高确定性的垃圾特征」，绝不用「机器发件人」这种招聘常态当噪声。
+
+// 只匹配发件人：确定性垃圾/邮件系统标记。刻意不含 noreply 家族。
+const FROM_NOISE_PATTERN = 'postmaster|mailer-daemon|newsletter|unsubscribe|list-?subscribe';
+
+// 只匹配主题：营销与金融推销特征。金融词直接针对实测已入库的 3 条纯营销邮件
+// （汇丰「開立…定期存款享額外現金獎賞」/ 恒生「立即申請…信用卡」/ 汇丰「卓越理財…教育峰会」）。
+// 刻意不含「服务通知|通知中心」：那是招聘门户常用的主题前缀，会把真通知一起丢掉。
+const SUBJECT_NOISE_PATTERN = '营销|推廣|推广|廣告|广告|退订|退訂|unsubscribe|newsletter|限時|限时|優惠|优惠|現金獎賞|现金奖赏|签賬|簽賬|開立|开立|定期存款|理財|理财|信用卡|貸款|贷款';
+
+// 强招聘信号：主题命中即**无条件放行**，不受上面两张噪声表影响。
+// 这是防误杀的最后一道保险——即便日后有人往噪声表里加了过宽的词，
+// 明确写着「面试邀请 / 笔试通知 / 录用通知」的邮件也不会被丢掉。
+const STRONG_SIGNAL_PATTERN = '面试邀请|面試邀請|面试通知|面試通知|笔试通知|筆試通知|机试通知|機試通知|测评通知|測評通知|評估通知|录用通知|錄用通知|意向书|意向書|入职通知|入職通知|复试通知|複試通知|终面|終面|体检通知|體檢通知|网申|網申|校园招聘|校園招聘|offer';
+
+// 丢弃原因枚举：预筛（prefilter）与 AI 结果判定（ai.verdictOnAiResult）共用同一套字面量，
+// 三处消费——Action 计数、Gist 的 meta.lastDropped、网页端 describeDropReason 的中文映射。
+// 放在 config.js（唯一配置入口）而不是 prefilter.js，避免 ai.js 反向依赖 prefilter.js。
+const DROP_REASONS = Object.freeze({
+  NOISE_FROM: 'noise-from',       // 发件人命中 FROM_NOISE_PATTERN
+  NOISE_SUBJECT: 'noise-subject', // 主题命中 SUBJECT_NOISE_PATTERN
+  NO_KEYWORD: 'no-keyword',       // 主题+正文都没命中关键词
+  AI_NOT_RECRUIT: 'ai-not-recruit', // AI 明确判定 isRecruitment=false
+  LOW_CONF: 'low-conf',           // AI 置信度低于 MIN_CONFIDENCE
+  AI_ERROR: 'ai-error'            // AI 调用失败（同时会写进 meta.lastError）
+});
 
 function strEnv(name, fallback = '') {
   const raw = process.env[name];
@@ -55,6 +109,10 @@ function buildConfig() {
     }),
     sinceDays: intEnv('SINCE_DAYS', 30),
     maxPerRun: intEnv('MAX_PER_RUN', 30),
+    // 回溯起点（仅手动 dispatch 传）：>0 时忽略云端水位，从该 UID 起重新扫描。
+    // 用途：捞回被旧噪声规则误杀、且水位已永久越过的邮件（水位推过就不会再回看）。
+    // 注意配合 MAX_PER_RUN 一起调大，否则一次只能重扫 maxPerRun 封。
+    uidFrom: intEnv('UID_FROM', 0),
     minConfidence: floatEnv('MIN_CONFIDENCE', 0.3),
     keywords: strEnv('KEYWORDS', DEFAULT_KEYWORDS),
     ai: Object.freeze({
@@ -71,10 +129,15 @@ function buildConfig() {
     }),
     // 邮件建议加密密钥（可选）：设了则 mail-suggestions.json 加密存储；留空则明文（向后兼容）
     mailEncKey: strEnv('MAIL_ENC_KEY', ''),
-    // 以下三项默认值，可被 Gist 里的 mail-config.json 覆盖（见 applyMailConfigOverrides）
+    // 以下几项默认值，可被 Gist 里的 mail-config.json 覆盖（见 applyMailConfigOverrides）
     enabled: true,
     minIntervalHours: 0,
-    promptExtra: ''
+    promptExtra: '',
+    // 整体替换内置提示词的「解析偏好」部分（v0.4.0）。留空则用 ai.js 的 DEFAULT_PROMPT_BODY。
+    // 注意：无论这里写什么，ai.js 的 OUTPUT_CONTRACT（只返回 JSON、字段清单、枚举、格式）
+    // 都会被强制拼在最后，用户改不掉——否则 extractJson/normalizeAiResult 会拿不到数据，
+    // 整条链路静默失效（建议队列永远为空，而 Action 仍报 success）。
+    promptOverride: ''
   });
 }
 
@@ -92,7 +155,10 @@ function applyMailConfigOverrides(cfg, mailConfig) {
     maxPerRun: num(mc.maxPerRun, cfg.maxPerRun),
     enabled: mc.enabled === false ? false : true, // 仅显式 false 才禁用
     minIntervalHours: Math.max(0, num(mc.minIntervalHours, cfg.minIntervalHours)),
-    promptExtra: str(mc.promptExtra, cfg.promptExtra, 2000)
+    promptExtra: str(mc.promptExtra, cfg.promptExtra, 2000),
+    // 清空即回落内置提示词：str() 对空串返回 fallback（cfg.promptOverride 默认 ''），
+    // 而 buildSystemPrompt 见到空 override 就用 DEFAULT_PROMPT_BODY，语义天然正确
+    promptOverride: str(mc.promptOverride, cfg.promptOverride, 4000)
   });
 }
 
@@ -120,8 +186,16 @@ function keywordRegex(keywords) {
   return new RegExp(parts.map(escapeRegExp).join('|'), 'i');
 }
 
-function noiseRegex() {
-  return new RegExp(NOISE_PATTERN, 'i');
+function fromNoiseRegex() {
+  return new RegExp(FROM_NOISE_PATTERN, 'i');
+}
+
+function subjectNoiseRegex() {
+  return new RegExp(SUBJECT_NOISE_PATTERN, 'i');
+}
+
+function strongSignalRegex() {
+  return new RegExp(STRONG_SIGNAL_PATTERN, 'i');
 }
 
 module.exports = {
@@ -130,11 +204,16 @@ module.exports = {
   MAIL_SUGGEST_FILENAME,
   MAIL_CONFIG_FILENAME,
   DEFAULT_KEYWORDS,
-  NOISE_PATTERN,
+  FROM_NOISE_PATTERN,
+  SUBJECT_NOISE_PATTERN,
+  STRONG_SIGNAL_PATTERN,
+  DROP_REASONS,
   buildConfig,
   applyMailConfigOverrides,
   gateReason,
   keywordRegex,
-  noiseRegex,
+  fromNoiseRegex,
+  subjectNoiseRegex,
+  strongSignalRegex,
   escapeRegExp
 };

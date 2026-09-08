@@ -12,11 +12,11 @@
 
 const { buildConfig, keywordRegex, applyMailConfigOverrides, gateReason, MAIL_CONFIG_FILENAME } = require('./src/config');
 const { openInbox, closeInbox, planFetch, fetchMessages } = require('./src/imap');
-const { isCandidate } = require('./src/prefilter');
+const { classifyMail, DROP_REASONS } = require('./src/prefilter');
 const { parseMessage } = require('./src/parse');
-const { computeWatermark, buildSuggestion, mergeSuggestions, buildMeta } = require('./src/state');
+const { computeWatermark, buildSuggestion, mergeSuggestions, buildMeta, createDropTracker } = require('./src/state');
 const { gistGet, readMailFile, patchMailFile } = require('./src/gist');
-const { analyzeEmail } = require('./src/ai');
+const { analyzeEmail, verdictOnAiResult, buildSystemPrompt } = require('./src/ai');
 
 function assertGistSecrets(cfg) {
   const missing = [];
@@ -75,7 +75,7 @@ async function run() {
 
   const { mailConfig, prev } = await loadGistState(cfg0);
   const cfg = applyMailConfigOverrides(cfg0, mailConfig);
-  console.log(`[sync] 配置：enabled=${cfg.enabled} minIntervalHours=${cfg.minIntervalHours} keywords="${cfg.keywords}" minConf=${cfg.minConfidence} sinceDays=${cfg.sinceDays} maxPerRun=${cfg.maxPerRun} enc=${cfg.mailEncKey ? 'on' : 'off'} promptExtra=${cfg.promptExtra ? 'yes' : 'no'}`);
+  console.log(`[sync] 配置：enabled=${cfg.enabled} minIntervalHours=${cfg.minIntervalHours} keywords="${cfg.keywords}" minConf=${cfg.minConfidence} sinceDays=${cfg.sinceDays} maxPerRun=${cfg.maxPerRun} enc=${cfg.mailEncKey ? 'on' : 'off'} promptExtra=${cfg.promptExtra ? 'yes' : 'no'} promptOverride=${cfg.promptOverride ? 'yes（已整体替换解析偏好，输出契约仍强制附加）' : 'no（用内置）'}`);
 
   const skip = gateReason(cfg, prev.meta);
   if (skip) { console.log(`[sync] ⏭️ 跳过本次（0 token）：${skip}`); return; }
@@ -89,17 +89,40 @@ async function run() {
   let candidates = 0;
   let aiErrors = 0;
   let lastAiError = '';
+  // 丢弃收集器：每封被丢的邮件都逐条打日志（只进 Actions 日志），汇总写进 meta.lastDropped（进 Gist、网页端可展开）。
+  // 修复前这里是静默 continue，用户只能靠"感觉没拉到"来怀疑漏了邮件。
+  const drops = createDropTracker((mail, reason) => {
+    console.log(`[sync] 丢弃 uid=${mail.sourceUid} reason=${reason} from=${mail.from || '-'} subj=${String(mail.subject || '').slice(0, 60)}`);
+  });
+  // 已成功完成裁决的 UID（预筛判定 或 AI 判定，无论结论是入选还是丢弃）。
+  //
+  // 为什么不能用「本轮抓取的全部 UID」：AI 调用失败（fetch failed / 超时 / 超额）属于
+  // **未能裁决**，不是「裁决为不该在队列里」。用抓取全集会让 AI 抖动时把已有的正确建议删掉——
+  // 实测过一次：回溯重扫 20 封时百炼端点 6/6 全部 fetch failed，incoming=0，
+  // 于是 uid 1881/1885/1887 三条已有建议（含招行素质测评通知 conf=0.98）被"重新裁决"删除，
+  // 建议从 10 条掉到 7 条。AI 失败的邮件必须保留旧建议，等下次运行重试。
+  //
+  // 必须声明在 try 块**外**：下面的 mergeSuggestions 在 finally 之后才用到它，
+  // 声明在 try 内会因块级作用域在运行时抛 ReferenceError（这个错误 node --check 与
+  // vm.Script 都抓不到，只有真实执行才会暴露，曾导致整次 workflow failure）。
+  const adjudicated = new Set();
 
   try {
-    const plan = planFetch(mailbox, prev.meta, cfg.sinceDays);
-    console.log(`[sync] 抓取模式=${plan.mode}${plan.mode === 'uid' ? ` startUid=${plan.startUid}` : ` since=${plan.since.toISOString()}`}${plan.resetWatermark ? '（UIDVALIDITY 变化→重置水位）' : ''}`);
+    const plan = planFetch(mailbox, prev.meta, cfg.sinceDays, cfg.uidFrom);
+    console.log(`[sync] 抓取模式=${plan.mode}${plan.mode === 'uid' ? ` startUid=${plan.startUid}` : ` since=${plan.since.toISOString()}`}${plan.forced ? '（UID_FROM 强制回溯：已忽略云端水位）' : ''}${plan.resetWatermark ? '（UIDVALIDITY 变化→重置水位）' : ''}`);
     fetched = await fetchMessages(client, plan, cfg.maxPerRun);
     console.log(`[sync] 本次抓取 ${fetched.length} 封（上限 ${cfg.maxPerRun}），INBOX exists=${mailbox.exists}`);
 
     const kw = keywordRegex(cfg.keywords);
     for (const msg of fetched) {
       const mail = await parseMessage(msg);
-      if (!isCandidate(mail, kw)) continue;
+      const verdict = classifyMail(mail, kw);
+      if (!verdict.pass) {
+        drops.note(mail, verdict.reason);
+        // 预筛丢弃是明确的裁决结论（规则变了就该按新规则清掉旧建议），计入已裁决
+        if (mail.sourceUid) adjudicated.add(mail.sourceUid);
+        continue;
+      }
       candidates += 1;
       let result;
       try {
@@ -107,11 +130,23 @@ async function run() {
       } catch (e) {
         aiErrors += 1;
         lastAiError = e.message;
+        drops.note(mail, DROP_REASONS.AI_ERROR);
         console.warn(`[sync] AI 分析失败 uid=${mail.sourceUid}：${e.message}`);
-        continue;
+        continue; // 刻意不计入 adjudicated：本轮未能裁决，保留已有建议
       }
-      if (Number(result.confidence) < cfg.minConfidence) {
-        console.log(`[sync] 丢弃低置信 uid=${mail.sourceUid} conf=${result.confidence} < ${cfg.minConfidence}`);
+      if (mail.sourceUid) adjudicated.add(mail.sourceUid);
+      // AI 结果的两道过滤（isRecruitment + 置信度）统一走 ai.verdictOnAiResult，
+      // 判定逻辑只有一处、可单测。isRecruitment 那道在 v4.6.1 之前完全不存在：
+      // 字段被 prompt 要求返回、被 normalizeAiResult 归一，却没有任何代码检查它，
+      // 导致纯营销邮件照样入库（实测 10 条建议里 3 条是汇丰存款/恒生信用卡/理财峰会）。
+      const aiVerdict = verdictOnAiResult(result, cfg.minConfidence);
+      if (!aiVerdict.accept) {
+        drops.note(mail, aiVerdict.reason);
+        if (aiVerdict.reason === DROP_REASONS.LOW_CONF) {
+          console.log(`[sync] 丢弃低置信 uid=${mail.sourceUid} conf=${result.confidence} < ${cfg.minConfidence}`);
+        } else {
+          console.log(`[sync] 丢弃 AI 判非招聘 uid=${mail.sourceUid} type=${result.emailType} conf=${result.confidence}`);
+        }
         continue;
       }
       incoming.push(buildSuggestion(mail, result));
@@ -120,7 +155,10 @@ async function run() {
     await closeInbox(client, lock);
   }
 
-  const merged = mergeSuggestions(prev.suggestions, incoming);
+  const dropped = drops.summary();
+  // 「重扫即重新裁决」只作用于**成功裁决过**的 UID：本轮扫过且判定为不该入队的旧建议会被移除
+  // （这样 UID_FROM 回溯才能纠正已入库的营销邮件）；AI 失败而未能裁决的一律保留旧建议。
+  const merged = mergeSuggestions(prev.suggestions, incoming, [...adjudicated]);
   const watermark = computeWatermark(mailbox, fetched.map(m => m.uid), prev.meta);
   const softError = aiErrors > 0;
   const meta = buildMeta({
@@ -129,11 +167,15 @@ async function run() {
     status: softError ? 'error' : 'ok',
     lastError: softError ? `AI 分析失败 ${aiErrors}/${candidates} 封：${lastAiError}` : '',
     newCount: incoming.length,
-    pendingCount: merged.length
+    pendingCount: merged.length,
+    lastDropped: dropped,
+    // 与实际发给 AI 的 system prompt 用同一个函数、同一组参数计算，保证网页端展示的就是生效的那份
+    promptSnapshot: buildSystemPrompt(cfg.promptExtra, cfg.promptOverride)
   });
 
   await patchMailFile(cfg, { meta, suggestions: merged });
   console.log(`[sync] ✅ 完成：候选 ${candidates}，新增/更新 ${incoming.length}，合并后 ${merged.length} 条，lastUid→${meta.lastUid}，lastStatus=${meta.lastStatus}`);
+  console.log(`[sync] 丢弃 ${dropped.total} 封：噪声发件人 ${dropped.noiseFrom} / 营销主题 ${dropped.noiseSubject} / 无关键词 ${dropped.noKeyword} / AI判非招聘 ${dropped.aiNotRecruit} / 低置信 ${dropped.lowConf} / AI失败 ${dropped.aiError}`);
   if (softError) console.warn('[sync] ⚠️ 存在 AI 软失败，已写入 meta.lastError（网页端会上屏提示），本轮抓取/水位正常。');
 }
 
