@@ -1,6 +1,6 @@
 # autumn-mail-sync
 
-> 本仓库是 monorepo `autumn-recruitment-tracker` 里 `services/mail-sync/` 的**同步产物**，由 `scripts/sync-template.js` 生成。请勿直接在此修改——改动会在下次同步时被覆盖。
+> 本仓库是 monorepo `autumn-recruitment-tracker` 里 `services/mail-sync/` 的**同步产物**，由 `scripts/sync-template.js` 生成。请勿直接在此修改——改动会在下次同步时被覆盖；要改代码请改 monorepo 的 `services/mail-sync/`，再跑同步脚本。
 
 把 QQ 邮箱里的招聘邮件（面试 / 笔试 / 测评 / Offer / 拒信）自动解析成**结构化建议**，写进你自己的私有 Gist 文件 `mail-suggestions.json`。网页端 **[秋招投递管理](https://github.com/ZixuanYan/autumn-recruitment-tracker)** 在云同步时顺带读取它，在新增的「邮件提醒」视图里**逐字段人工复核**后并入投递台账。
 
@@ -27,7 +27,11 @@
 
 M0 目的：在投入真实联调前，验证最脆弱的假设——**QQ 授权码能否从 GitHub-hosted runner（境外 Azure IP）经 IMAP 登录成功**。
 
-1. **建私有仓库**：在 GitHub 新建 **private** 仓库 `autumn-mail-sync`，把本目录代码推上去（`git init && git remote add origin … && git push`，由你手动执行）。
+1. **建私有仓库**（务必设为 **private**——Secrets 与运行日志都在这个仓库里）：
+   - 如果你是从模板仓库点绿色「**Use this template**」→「Create a new repository」创建的：**本步已经完成**，代码已在你的仓库里，直接看第 2 步。
+   - 如果你是手工拿到这份代码的（例如从 monorepo 的 `services/mail-sync/` 拷出来）：先在 GitHub 新建一个 private 空仓库，然后
+     `git init && git remote add origin <你的私有仓库地址> && git add -A && git commit -m "init" && git push -u origin main`
+   - 仓库名随意，本文后续用 `autumn-mail-sync` 指代它。
 2. **QQ 邮箱开启 IMAP 并生成授权码**：
    - 登录 QQ 邮箱网页版 → 设置 → 账户 → 开启「IMAP/SMTP 服务」；
    - 按提示用手机发短信验证，得到一个 **16 位授权码**（不是 QQ 密码）；
